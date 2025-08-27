@@ -101,7 +101,7 @@ st.markdown("""
         background-color: #fff3cd;
         padding: 1rem;
         border-radius: 0.5rem;
-        margin-top: 1rem;
+        margin-top: 1.5rem;
         margin-bottom: 1rem;
         border-left: 4px solid #ffc107;
     }
@@ -110,9 +110,18 @@ st.markdown("""
         background-color: #d4edda;
         padding: 1rem;
         border-radius: 0.5rem;
-        margin-top: 1rem;
+        margin-top: 1.5rem;
         margin-bottom: 1rem;
         border-left: 4px solid #28a745;
+    }
+    /* Time selection section */
+    .time-select-section {
+        background-color: #e7f3ff;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+        border-left: 4px solid #1f77b4;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -206,28 +215,73 @@ def compute_rms(y, sr, win_ms=800):  # Default window size changed to 800ms
     times = np.arange(len(rms)) * (hop / sr)
     return rms_norm, times, hop
 
-def detect_silences_energy(rms_norm, times, hop, sr, threshold=0.05, min_sil_ms=500, merge_ms=40):  # Default min_sil_ms changed to 500ms
-    mask = rms_norm < threshold
-    min_frames = max(1, int(math.ceil((min_sil_ms/1000.0) / (hop/sr))))
-    merge_frames = max(1, int(math.ceil((merge_ms/1000.0) / (hop/sr))))
-    mask = binary_closing(mask, structure=np.ones(merge_frames))
-    mask = binary_opening(mask, structure=np.ones(max(1, min(2, merge_frames//2))))
-    ranges = []
-    L = len(mask)
-    i = 0
-    while i < L:
-        if mask[i]:
-            j = i
-            while j+1 < L and mask[j+1]:
-                j += 1
-            if (j - i + 1) >= min_frames:
-                start_time = i * (hop/sr)
-                end_time = (j + 1) * (hop/sr)
-                ranges.append({"start_idx": i, "end_idx": j, "start_time": float(start_time), "end_time": float(end_time)})
-            i = j + 1
-        else:
-            i += 1
-    return ranges
+def detect_silences_energy(rms_norm, times, hop, sr, threshold=0.05, min_sil_ms=500, merge_ms=40):
+    """
+    Improved silence detection that properly implements the minimum silence duration requirement.
+    When the RMS value drops below the threshold, it checks if it stays below for at least the minimum duration.
+    """
+    # Convert time durations to frames
+    min_sil_frames = max(1, int((min_sil_ms/1000.0) * sr / hop))
+    merge_frames = max(1, int((merge_ms/1000.0) * sr / hop))
+    
+    # Find all potential silence regions
+    silences = []
+    in_silence = False
+    silence_start = 0
+    
+    for i, value in enumerate(rms_norm):
+        if value < threshold and not in_silence:
+            # Start of potential silence
+            in_silence = True
+            silence_start = i
+        elif value >= threshold and in_silence:
+            # End of potential silence
+            in_silence = False
+            silence_end = i - 1
+            
+            # Check if this silence meets the minimum duration requirement
+            silence_duration = (silence_end - silence_start + 1) * (hop / sr) * 1000  # in ms
+            if silence_duration >= min_sil_ms:
+                silences.append({
+                    "start_idx": silence_start,
+                    "end_idx": silence_end,
+                    "start_time": float(silence_start * (hop / sr)),
+                    "end_time": float((silence_end + 1) * (hop / sr))
+                })
+    
+    # Handle case where silence continues to the end
+    if in_silence:
+        silence_end = len(rms_norm) - 1
+        silence_duration = (silence_end - silence_start + 1) * (hop / sr) * 1000  # in ms
+        if silence_duration >= min_sil_ms:
+            silences.append({
+                "start_idx": silence_start,
+                "end_idx": silence_end,
+                "start_time": float(silence_start * (hop / sr)),
+                "end_time": float((silence_end + 1) * (hop / sr))
+            })
+    
+    # Merge silences that are close together
+    if silences and merge_frames > 1:
+        merged_silences = []
+        current_silence = silences[0]
+        
+        for next_silence in silences[1:]:
+            gap = next_silence["start_idx"] - current_silence["end_idx"]
+            if gap <= merge_frames:
+                # Merge the silences
+                current_silence["end_idx"] = next_silence["end_idx"]
+                current_silence["end_time"] = next_silence["end_time"]
+            else:
+                # Add the current silence and move to the next
+                merged_silences.append(current_silence)
+                current_silence = next_silence
+        
+        # Add the last silence
+        merged_silences.append(current_silence)
+        silences = merged_silences
+    
+    return silences
 
 def build_ayahs_from_silences(silences, audio_duration):
     mapping = []
@@ -278,7 +332,7 @@ def build_ayahs_from_silences(silences, audio_duration):
     
     return mapping
 
-def plot_waveform(rms_norm, rms_times, silences, ayahs, current_time=0, xaxis_interval=10):
+def plot_waveform(rms_norm, rms_times, silences, ayahs, current_time=0, xaxis_interval=10, start_time=0, end_time=None):
     fig = go.Figure()
     
     # Add waveform with improved styling
@@ -340,6 +394,31 @@ def plot_waveform(rms_norm, rms_times, silences, ayahs, current_time=0, xaxis_in
             annotation_position="bottom right",
             annotation_font_size=12,
             annotation_font_color="orange"
+        )
+    
+    # Add start and end time markers if specified
+    if start_time > 0:
+        fig.add_vline(
+            x=start_time, 
+            line_width=3, 
+            line_dash="dash", 
+            line_color="blue", 
+            annotation_text="Start", 
+            annotation_position="top left",
+            annotation_font_size=12,
+            annotation_font_color="blue"
+        )
+    
+    if end_time and end_time < max(rms_times) if len(rms_times) > 0 else 1:
+        fig.add_vline(
+            x=end_time, 
+            line_width=3, 
+            line_dash="dash", 
+            line_color="purple", 
+            annotation_text="End", 
+            annotation_position="top right",
+            annotation_font_size=12,
+            annotation_font_color="purple"
         )
     
     # Calculate x-axis tick values based on interval
@@ -421,6 +500,27 @@ if 'manual_adjustments' not in st.session_state:
     st.session_state.manual_adjustments = {}
 if 'xaxis_interval' not in st.session_state:
     st.session_state.xaxis_interval = 10
+if 'process_start_time' not in st.session_state:
+    st.session_state.process_start_time = 0.0
+if 'process_end_time' not in st.session_state:
+    st.session_state.process_end_time = None
+if 'time_range_updated' not in st.session_state:
+    st.session_state.time_range_updated = False
+if 'full_audio_loaded' not in st.session_state:
+    st.session_state.full_audio_loaded = False
+if 'settings_changed' not in st.session_state:
+    st.session_state.settings_changed = False
+if 'current_settings' not in st.session_state:
+    st.session_state.current_settings = {
+        'win_ms': 102,
+        'threshold': 0.16,
+        'min_sil_ms': 800,
+        'merge_ms': 400
+    }
+
+# Callback function for settings changes
+def on_setting_change():
+    st.session_state.settings_changed = True
 
 # --- UI Layout ---
 col1, col2 = st.columns([1, 2])
@@ -439,6 +539,11 @@ with col1:
             st.session_state.audio_segments = {}
             st.session_state.last_played_ayah = -1
             st.session_state.manual_adjustments = {}
+            st.session_state.process_start_time = 0.0
+            st.session_state.process_end_time = None
+            st.session_state.time_range_updated = False
+            st.session_state.full_audio_loaded = False
+            st.session_state.settings_changed = False
         
         # read into BytesIO and load audio using robust loader
         bytesio = io.BytesIO(uploaded.read())
@@ -452,6 +557,7 @@ with col1:
             st.session_state['audio_duration'] = duration
             st.session_state['audio_bytes'] = bytesio.getvalue()
             st.session_state['upload_name'] = uploaded.name
+            st.session_state.full_audio_loaded = True
             
             st.success(f"✅ Audio loaded successfully")
             st.info(f"**Duration:** {duration:.2f} seconds\n\n**Sample rate:** {sr} Hz")
@@ -461,21 +567,70 @@ with col1:
             
         except Exception as e:
             st.error(f"Error loading audio: {str(e)}")
+    
+    # Time selection for processing (only show if audio is loaded)
+    if st.session_state.get('full_audio_loaded', False):
+        st.markdown('<div class="time-select-section">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Processing Time Range</div>', unsafe_allow_html=True)
+        st.markdown("Select the time range to process (leave empty to process entire audio):")
+        
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_time = st.number_input("Start time (seconds)", 
+                                       min_value=0.0, 
+                                       max_value=float(st.session_state['audio_duration']), 
+                                       value=st.session_state.process_start_time,
+                                       step=0.1,
+                                       key="start_time_input")
+        
+        with col_end:
+            end_time = st.number_input("End time (seconds)", 
+                                     min_value=0.0, 
+                                     max_value=float(st.session_state['audio_duration']), 
+                                     value=st.session_state.process_end_time or float(st.session_state['audio_duration']),
+                                     step=0.1,
+                                     key="end_time_input")
+        
+        # Validate time range
+        if start_time >= end_time:
+            st.error("End time must be greater than start time")
+        else:
+            st.session_state.process_start_time = start_time
+            st.session_state.process_end_time = end_time
+            st.info(f"Will process audio from {start_time:.2f}s to {end_time:.2f}s")
+        
+        # Update time range button
+        if st.button("Update Time Range", key="update_time_range", use_container_width=True):
+            st.session_state.time_range_updated = True
+            st.session_state.detection_done = False
+            st.session_state.audio_updated = True
+            st.session_state.settings_changed = False
+            st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-header">Detection Settings</div>', unsafe_allow_html=True)
     
     # Settings with new defaults
-    win_ms = st.slider("Window size (ms)", min_value=0, max_value=2000, value=102, step=1,
-                      help="Size of the analysis window in milliseconds. Larger values provide smoother RMS calculation.")
+    win_ms = st.slider("Window size (ms)", min_value=0, max_value=2000, 
+                      value=st.session_state.current_settings['win_ms'], step=1,
+                      help="Size of the analysis window in milliseconds. Larger values provide smoother RMS calculation.",
+                      on_change=on_setting_change)
     
-    threshold = st.slider("Silence threshold", min_value=0.0, max_value=1.0, value=0.13, step=0.005,
-                         help="Threshold below which audio is considered silence. Lower values are more sensitive.")
+    threshold = st.slider("Silence threshold", min_value=0.0, max_value=1.0, 
+                         value=st.session_state.current_settings['threshold'], step=0.005,
+                         help="Threshold below which audio is considered silence. Lower values are more sensitive.",
+                         on_change=on_setting_change)
     
-    min_sil_ms = st.slider("Minimum silence duration (ms)", min_value=10, max_value=5000, value=250, step=10,
-                          help="Minimum duration of silence to be considered a valid silence period.")
+    min_sil_ms = st.slider("Minimum silence duration (ms)", min_value=10, max_value=5000, 
+                          value=st.session_state.current_settings['min_sil_ms'], step=10,
+                          help="Minimum duration of silence to be considered a valid silence period.",
+                          on_change=on_setting_change)
     
-    merge_ms = st.slider("Merge gaps (ms)", min_value=0, max_value=1000, value=200, step=10,
-                        help="Merge silence periods separated by gaps smaller than this value.")
+    merge_ms = st.slider("Merge gaps (ms)", min_value=0, max_value=1000, 
+                        value=st.session_state.current_settings['merge_ms'], step=10,
+                        help="Merge silence periods separated by gaps smaller than this value.",
+                        on_change=on_setting_change)
     
     # X-axis interval setting
     xaxis_interval = st.slider("X-axis time interval (seconds)", min_value=1, max_value=60, 
@@ -486,18 +641,34 @@ with col1:
     if xaxis_interval != st.session_state.xaxis_interval:
         st.session_state.xaxis_interval = xaxis_interval
     
-    detect_button = st.button("Detect Ayahs", type="primary", use_container_width=True)
+    # Show warning if settings have changed
+    if st.session_state.settings_changed:
+        st.warning("Settings have been changed. Click 'Detect Ayahs' to apply the new settings.")
+    
+    detect_button = st.button("Detect Ayahs", type="primary", use_container_width=True, 
+                             disabled=not st.session_state.get('time_range_updated', False))
 
 with col2:
-    if 'audio_data' in st.session_state:
+    if 'audio_data' in st.session_state and st.session_state.get('time_range_updated', False):
         st.markdown('<div class="section-header">Waveform Visualization</div>', unsafe_allow_html=True)
         
         # Calculate RMS if not already calculated or if settings changed
         if ('rms_norm' not in st.session_state or 
             st.session_state.get('win_ms', 0) != win_ms or
-            st.session_state.audio_updated):
+            st.session_state.audio_updated or
+            st.session_state.settings_changed):
             with st.spinner("Calculating waveform..."):
-                rms_norm, rms_times, hop = compute_rms(st.session_state['audio_data'], st.session_state['sample_rate'], max(1, win_ms))
+                # Apply time range if specified
+                start_sample = int(st.session_state.process_start_time * st.session_state['sample_rate'])
+                end_sample = int(st.session_state.process_end_time * st.session_state['sample_rate']) if st.session_state.process_end_time else None
+                
+                audio_data_to_process = st.session_state['audio_data'][start_sample:end_sample]
+                rms_norm, rms_times, hop = compute_rms(audio_data_to_process, st.session_state['sample_rate'], max(1, win_ms))
+                
+                # Adjust times to account for start time offset
+                if st.session_state.process_start_time > 0:
+                    rms_times = rms_times + st.session_state.process_start_time
+                
                 st.session_state['rms_norm'] = rms_norm
                 st.session_state['rms_times'] = rms_times
                 st.session_state['hop'] = hop
@@ -506,10 +677,32 @@ with col2:
         
         # Detect silences if button clicked
         if detect_button:
+            # Update current settings
+            st.session_state.current_settings = {
+                'win_ms': win_ms,
+                'threshold': threshold,
+                'min_sil_ms': min_sil_ms,
+                'merge_ms': merge_ms
+            }
+            st.session_state.settings_changed = False
+            
             with st.spinner("Detecting silences and ayahs..."):
+                # Apply time range if specified
+                start_time = st.session_state.process_start_time
+                end_time = st.session_state.process_end_time or st.session_state['audio_duration']
+                
+                # Filter RMS data to only include the selected time range
+                if start_time > 0 or end_time < st.session_state['audio_duration']:
+                    time_mask = (st.session_state['rms_times'] >= start_time) & (st.session_state['rms_times'] <= end_time)
+                    rms_norm_filtered = st.session_state['rms_norm'][time_mask]
+                    rms_times_filtered = st.session_state['rms_times'][time_mask]
+                else:
+                    rms_norm_filtered = st.session_state['rms_norm']
+                    rms_times_filtered = st.session_state['rms_times']
+                
                 silences = detect_silences_energy(
-                    st.session_state['rms_norm'], 
-                    st.session_state['rms_times'], 
+                    rms_norm_filtered, 
+                    rms_times_filtered, 
                     st.session_state['hop'], 
                     st.session_state['sample_rate'], 
                     threshold=threshold, 
@@ -517,7 +710,10 @@ with col2:
                     merge_ms=merge_ms
                 )
                 
-                ayahs = build_ayahs_from_silences(silences, st.session_state['audio_duration'])
+                # Filter silences to only include those within the selected time range
+                silences = [s for s in silences if s['start_time'] >= start_time and s['end_time'] <= end_time]
+                
+                ayahs = build_ayahs_from_silences(silences, end_time)
                 
                 st.session_state['silences'] = silences
                 st.session_state['ayahs'] = ayahs
@@ -548,7 +744,9 @@ with col2:
                 silences, 
                 ayahs,
                 current_time,
-                st.session_state.xaxis_interval
+                st.session_state.xaxis_interval,
+                st.session_state.process_start_time,
+                st.session_state.process_end_time
             )
             
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
@@ -617,12 +815,12 @@ with col2:
                     with col3:
                         new_start = st.number_input("Start time (s)", value=float(ayah['start']), min_value=0.0, 
                                                    max_value=st.session_state['audio_duration'], step=0.1,
-                                                   key="start_time_input")
+                                                   key="start_time_input_manual")
                     
                     with col4:
                         new_end = st.number_input("End time (s)", value=float(ayah['end']), min_value=0.0, 
                                                  max_value=st.session_state['audio_duration'], step=0.1,
-                                                 key="end_time_input")
+                                                 key="end_time_input_manual")
                     
                     if st.button("Update Ayah Time", key="update_ayah"):
                         if new_start < new_end:
@@ -674,7 +872,7 @@ with col2:
                     'Start (s)': f"{ayah['start']:.3f}",
                     'End (s)': f"{ayah['end']:.3f}",
                     'Duration (s)': f"{ayah['duration']:.3f}",
-                    # 'Silence (ms)': f"{ayah.get('silence_duration', 0) * 1000:.0f}"
+                    'Silence (ms)': f"{ayah.get('silence_duration', 0) * 1000:.0f}"
                 })
             
             df = pd.DataFrame(ayah_data)
@@ -708,6 +906,10 @@ with col2:
                     use_container_width=True
                 )
             st.markdown('</div>', unsafe_allow_html=True)
+    elif 'audio_data' in st.session_state:
+        st.info("Please set the time range and click 'Update Time Range' to begin processing.")
+    else:
+        st.info("Please upload an audio file to begin.")
 
 # Instructions and information
 with st.expander("How to use this tool"):
@@ -715,19 +917,20 @@ with st.expander("How to use this tool"):
     ### Step-by-Step Guide
     
     1. **Upload Audio**: Use the file uploader to select an audio file (WAV, MP3, OGG, FLAC, or M4A)
-    2. **Adjust Settings**: 
+    2. **Select Time Range**: Choose the start and end time for processing and click "Update Time Range"
+    3. **Adjust Settings**: 
        - **Window Size**: 800ms by default - larger values provide smoother analysis
        - **Silence Threshold**: 0.05 by default - lower values detect more silences
        - **Min Silence Duration**: 500ms by default - only silences longer than this are considered
        - **Merge Gaps**: 40ms by default - silence periods closer than this are merged
        - **X-axis Interval**: Set the time interval for x-axis ticks (default: 10 seconds)
-    3. **Detect Ayahs**: Click the "Detect Ayahs" button to analyze the audio
-    4. **Review Results**: 
+    4. **Detect Ayahs**: Click the "Detect Ayahs" button to analyze the audio
+    5. **Review Results**: 
        - The waveform visualization shows silences (red areas) and ayah boundaries (green lines)
        - The table displays detailed timing information for each ayah
-    5. **Playback**: Select an ayah from the dropdown to listen to it individually
-    6. **Manual Adjustment**: You can manually adjust the start and end times of any ayah
-    7. **Export**: Download the results as JSON or CSV for further analysis
+    6. **Playback**: Select an ayah from the dropdown to listen to it individually
+    7. **Manual Adjustment**: You can manually adjust the start and end times of any ayah
+    8. **Export**: Download the results as JSON or CSV for further analysis
     
     ### Tips for Best Results
     
@@ -737,6 +940,7 @@ with st.expander("How to use this tool"):
     - Use the merge gaps setting to handle brief interruptions in silence periods
     - Use the manual adjustment feature to fine-tune the ayah boundaries
     - Use the X-axis interval setting to adjust the time scale for better visualization
+    - Use the time range selection to process only a specific part of long audio files
     """)
 
 # Footer
