@@ -1,4 +1,13 @@
-
+#!/usr/bin/env python3
+# Usage:
+#   python silence_detector_json.py path/to/audio.mp3
+# Options:
+#   --threshold FLOAT       (default 0.16)
+#   --min_silence INT       minimum silence duration in ms (default 800)
+#   --merge_gap INT         merge gap in ms (default 400)
+#   --window INT            RMS window size in ms (default 102)
+#   --output PATH, -o PATH  output JSON path (default: <audio_basename>_silences.json)
+#   --verbose, -v           verbose output
 
 import argparse
 import json
