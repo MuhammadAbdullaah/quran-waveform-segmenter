@@ -14,14 +14,12 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import base64
 
-# Try pydub for fallback mp3 -> wav conversion
 try:
     from pydub import AudioSegment
     HAS_PYDUB = True
 except Exception:
     HAS_PYDUB = False
 
-# Optional webrtcvad
 try:
     import webrtcvad
     HAS_VAD = True
@@ -30,7 +28,6 @@ except Exception:
 
 st.set_page_config(page_title="Ayah Silence Detector", layout="wide", page_icon="🎵")
 
-# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
